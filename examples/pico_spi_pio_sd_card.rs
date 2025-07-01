@@ -64,8 +64,7 @@
 // The macro for our start-up function
 use rp_pico::entry;
 
-// info!() and error!() macros for printing information to the debug output
-use defmt::*;
+// defmt::info!() and defmt::error!() macros for printing information to the debug output
 use defmt_rtt as _;
 
 // Ensure we halt the program on panic (if we don't mention this crate it won't
@@ -87,9 +86,9 @@ use rp_pico::hal::pac;
 use rp_pico::hal;
 
 // Provides `.delay_ms(…)`.
-use embedded_hal::blocking::delay::DelayMs;
+use embedded_hal::delay::DelayNs;
 // Provides gpio generic operations.
-use embedded_hal::digital::v2::OutputPin;
+use embedded_hal::digital::OutputPin;
 
 // Link in the embedded_sdmmc crate.
 // The `SdMmcSpi` is used for block level access to the card.
@@ -128,7 +127,7 @@ const BLINK_ERR_5_SHORT: [u8; 10] = [1u8, 0u8, 1u8, 0u8, 1u8, 0u8, 1u8, 0u8, 1u8
 
 fn blink_signals(
     pin: &mut impl OutputPin<Error = core::convert::Infallible>,
-    mut delay: impl DelayMs<u32>,
+    mut delay: impl DelayNs,
     sig: &[u8],
 ) {
     for bit in sig {
@@ -152,7 +151,7 @@ fn blink_signals(
 
 fn blink_signals_loop(
     pin: &mut impl OutputPin<Error = core::convert::Infallible>,
-    mut delay: impl DelayMs<u32> + Clone,
+    mut delay: impl DelayNs + Clone,
     sig: &[u8],
 ) -> ! {
     loop {
@@ -207,7 +206,7 @@ fn main() -> ! {
 
     // These are implicitly used by the spi driver if they are in the correct mode
     let (mut pio, sm0, _, _, _) = pac.PIO0.split(&mut pac.RESETS);
-    let spi: spi_pio::Spi<'_, _, _, _, _, _, 8> = spi_pio::Spi::new(
+    let spi_bus: spi_pio::Spi<'_, _, _, _, _, _, 8> = spi_pio::Spi::new(
         (&mut pio, sm0),
         (gpio4, pins.gpio3, pins.gpio2),
         embedded_hal::spi::MODE_0,
@@ -218,27 +217,29 @@ fn main() -> ! {
     .unwrap();
     let spi_cs = pins.gpio5.into_push_pull_output();
 
+    let spi_dev = embedded_hal_bus::spi::ExclusiveDevice::new(spi_bus, spi_cs, timer).unwrap();
+
     // Exchange the uninitialised SPI driver for an initialised one
 
-    info!("Init SD card controller...");
-    let sdcard = SdCard::new(spi, spi_cs, timer);
+    defmt::info!("Init SD card controller...");
+    let sdcard = SdCard::new(spi_dev, timer);
 
-    info!("OK!\nCard size...");
+    defmt::info!("OK!\nCard size...");
     match sdcard.num_bytes() {
-        Ok(size) => info!("card size is {} bytes", size),
+        Ok(size) => defmt::info!("card size is {} bytes", size),
         Err(e) => {
-            error!("Error retrieving card size: {}", defmt::Debug2Format(&e));
+            defmt::error!("Error retrieving card size: {}", defmt::Debug2Format(&e));
             blink_signals_loop(&mut led_pin, timer, &BLINK_ERR_2_SHORT);
         }
     }
     blink_signals(&mut led_pin, timer, &BLINK_OK_LONG);
 
-    info!("Getting Volume 0...");
-    let mut volume_mgr = embedded_sdmmc::VolumeManager::new(sdcard, DummyTimesource);
+    defmt::info!("Getting Volume 0...");
+    let volume_mgr = embedded_sdmmc::VolumeManager::new(sdcard, DummyTimesource);
     let volume = match volume_mgr.open_volume(VolumeIdx(0)) {
         Ok(v) => v,
         Err(e) => {
-            error!("Error getting volume 0: {}", defmt::Debug2Format(&e));
+            defmt::error!("Error getting volume 0: {}", defmt::Debug2Format(&e));
             blink_signals_loop(&mut led_pin, timer, &BLINK_ERR_3_SHORT);
         }
     };
@@ -246,22 +247,22 @@ fn main() -> ! {
 
     // After we have the volume (partition) of the drive we got to open the
     // root directory:
-    let dir = match volume_mgr.open_root_dir(volume) {
+    let dir = match volume_mgr.open_root_dir(volume.to_raw_volume()) {
         Ok(dir) => dir,
         Err(e) => {
-            error!("Error opening root dir: {}", defmt::Debug2Format(&e));
+            defmt::error!("Error opening root dir: {}", defmt::Debug2Format(&e));
             blink_signals_loop(&mut led_pin, timer, &BLINK_ERR_4_SHORT);
         }
     };
 
-    info!("Root directory opened!");
+    defmt::info!("Root directory opened!");
     blink_signals(&mut led_pin, timer, &BLINK_OK_LONG);
 
     // This shows how to iterate through the directory and how
     // to get the file names (and print them in hope they are UTF-8 compatible):
     volume_mgr
         .iterate_dir(dir, |ent| {
-            info!(
+            defmt::info!(
                 "/{}.{}",
                 core::str::from_utf8(ent.name.base_name()).unwrap(),
                 core::str::from_utf8(ent.name.extension()).unwrap()
@@ -280,7 +281,7 @@ fn main() -> ! {
         volume_mgr.close_file(file).unwrap();
 
         if read_count >= 2 {
-            info!("READ {} bytes: {}", read_count, buf);
+            defmt::info!("READ {} bytes: {}", read_count, buf);
 
             // If we read what we wrote before the last reset,
             // we set a flag so that the success blinking at the end
@@ -299,7 +300,7 @@ fn main() -> ! {
             volume_mgr.close_file(file).unwrap();
         }
         Err(e) => {
-            error!("Error opening file 'O.TST': {}", defmt::Debug2Format(&e));
+            defmt::error!("Error opening file 'O.TST': {}", defmt::Debug2Format(&e));
             blink_signals_loop(&mut led_pin, timer, &BLINK_ERR_5_SHORT);
         }
     }
@@ -309,10 +310,10 @@ fn main() -> ! {
     blink_signals(&mut led_pin, timer, &BLINK_OK_LONG);
 
     if successful_read {
-        info!("Successfully read previously written file 'O.TST'");
+        defmt::info!("Successfully read previously written file 'O.TST'");
     } else {
-        info!("Could not read file, which is ok for the first run.");
-        info!("Reboot the pico!");
+        defmt::info!("Could not read file, which is ok for the first run.");
+        defmt::info!("Reboot the pico!");
     }
 
     loop {

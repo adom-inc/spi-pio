@@ -1,8 +1,6 @@
 #![no_std]
-use embedded_hal::{
-    blocking::spi,
-    spi::{Phase, Polarity},
-};
+
+use embedded_hal::spi::{Phase, Polarity};
 use fugit::HertzU32;
 use pio::{Instruction, InstructionOperands};
 use rp2040_hal::{
@@ -139,7 +137,7 @@ where
         let mosi_pin_id = mosi.id();
         let miso_pin_id = miso.id();
         let sclk_pin_id = sclk.id();
-        let (mut sm, rx, tx) = rp2040_hal::pio::PIOBuilder::from_program(installed)
+        let (mut sm, rx, tx) = rp2040_hal::pio::PIOBuilder::from_installed_program(installed)
             .buffers(rp2040_hal::pio::Buffers::RxTx)
             .out_pins(mosi_pin_id.num, 1)
             .in_pin_base(miso_pin_id.num)
@@ -197,68 +195,117 @@ where
 }
 
 macro_rules! impl_write {
-        ($type:ty, $fn:ident, [$($nr:expr),+]) => {
-            $(
-                impl<'pio, P, SMI, MISO, MOSI, SCLK> embedded_hal::spi::FullDuplex<$type>
-                for Spi<'pio, P, SMI, MISO, MOSI, SCLK, $nr>
-                where
+    ($type:ty, $fn:ident, [$($nr:expr),+]) => {
+        $(
+            impl<'pio, P, SMI, MISO, MOSI, SCLK> embedded_hal_nb::spi::FullDuplex<$type>
+            for Spi<'pio, P, SMI, MISO, MOSI, SCLK, $nr>
+            where
                 P: PIOExt,
                 SMI: StateMachineIndex,
                 MISO: AnyPin,
                 MOSI: AnyPin,
                 SCLK: AnyPin,
-                {
+            {
+                fn read(&mut self) ->  nb::Result<$type, core::convert::Infallible> {
+                    if let Some(r) = self.rx.read() {
+                        Ok(r as $type)
+                    } else {
+                        Err(nb::Error::WouldBlock)
+                    }
+                }
+
+                fn write(&mut self, word: $type) -> nb::Result<(), core::convert::Infallible> {
+                    if self.tx.$fn(word) {
+                        Ok(())
+                    } else {
+                        Err(nb::Error::WouldBlock)
+                    }
+                }
+            }
+
+            impl<'pio, P, SMI, MISO, MOSI, SCLK> embedded_hal::spi::ErrorType
+            for Spi<'pio, P, SMI, MISO, MOSI, SCLK, $nr>
+            where
+                P: PIOExt,
+                SMI: StateMachineIndex,
+                MISO: AnyPin,
+                MOSI: AnyPin,
+                SCLK: AnyPin,
+            {
                     type Error = core::convert::Infallible;
+            }
 
-                    fn read(&mut self) -> nb::Result<$type, Self::Error> {
-                        if let Some(r) = self.rx.read() {
-                            Ok(r as $type)
-                        } else {
-                            Err(nb::Error::WouldBlock)
+            impl<'pio, P, SMI, MISO, MOSI, SCLK> embedded_hal::spi::SpiBus<$type>
+            for Spi<'pio, P, SMI, MISO, MOSI, SCLK, $nr>
+            where
+                P: PIOExt,
+                SMI: StateMachineIndex,
+                MISO: AnyPin,
+                MOSI: AnyPin,
+                SCLK: AnyPin,
+            {
+                fn read(&mut self, words: &mut [$type]) -> Result<(), Self::Error> {
+                    for word in words {
+                        *word = nb::block!(<Self as embedded_hal_nb::spi::FullDuplex<$type>>::read(self))?;
+                    }
+
+                    Ok(())
+                }
+
+                fn write(&mut self, words: &[$type]) -> Result<(), Self::Error> {
+                    for word in words {
+                        nb::block!(<Self as embedded_hal_nb::spi::FullDuplex<$type>>::write(self, *word))?;
+                    }
+
+                    Ok(())
+                }
+
+                fn transfer(
+                    &mut self,
+                    read: &mut [$type],
+                    write: &[$type],
+                ) -> Result<(), Self::Error>{
+                    let len = read.len().max(write.len());
+                    for i in 0..len {
+                        // write one word. Send empty word if buffer is empty.
+                        let wb = write.get(i).copied().unwrap_or(0);
+                        nb::block!(<Self as embedded_hal_nb::spi::FullDuplex<$type>>::write(self, wb))?;
+
+                        // read one word. Drop extra words if buffer is full.
+                        let rb = nb::block!(<Self as embedded_hal_nb::spi::FullDuplex<$type>>::read(self))?;
+                        if let Some(r) = read.get_mut(i) {
+                            *r = rb;
                         }
                     }
 
-                    fn send(&mut self, word: $type) -> nb::Result<(), Self::Error> {
-                        if self.tx.$fn(word) {
-                            Ok(())
-                        } else {
-                            Err(nb::Error::WouldBlock)
-                        }
+                    Ok(())
+                }
+
+                fn transfer_in_place(
+                    &mut self,
+                    words: &mut [$type],
+                ) -> Result<(), Self::Error>{
+                    for word in words.iter_mut() {
+                        // write one word
+                        nb::block!(<Self as embedded_hal_nb::spi::FullDuplex<$type>>::write(self, *word))?;
+                        // read one word
+                        *word = nb::block!(<Self as embedded_hal_nb::spi::FullDuplex<$type>>::read(self))?;
                     }
+
+
+                    Ok(())
                 }
-                impl<'pio, P, SMI, MISO, MOSI, SCLK> spi::write::Default<$type>
-                    for Spi<'pio, P, SMI, MISO, MOSI, SCLK, $nr>
-                        where
-                    P: PIOExt,
-                    SMI: StateMachineIndex,
-                    MISO: AnyPin,
-                    MOSI: AnyPin,
-                    SCLK: AnyPin,
-                {
+
+                fn flush(&mut self) -> Result<(), Self::Error>{
+                    while !self.tx.is_empty() {}
+
+                    Ok(())
                 }
-                impl<'pio, P, SMI, MISO, MOSI, SCLK> spi::transfer::Default<$type>
-                    for Spi<'pio, P, SMI, MISO, MOSI, SCLK, $nr>
-                        where
-                    P: PIOExt,
-                    SMI: StateMachineIndex,
-                    MISO: AnyPin,
-                    MOSI: AnyPin,
-                    SCLK: AnyPin,
-                {
-                }
-                impl<'pio, P, SMI, MISO, MOSI, SCLK> spi::write_iter::Default<$type>
-                    for Spi<'pio, P, SMI, MISO, MOSI, SCLK, $nr>
-                        where
-                    P: PIOExt,
-                    SMI: StateMachineIndex,
-                    MISO: AnyPin,
-                    MOSI: AnyPin,
-                    SCLK: AnyPin,
-                {
-                }
-            )+
-        };
-    }
+            }
+        )+
+    };
+}
+
 impl_write!(u8, write_u8_replicated, [1, 2, 3, 4, 5, 6, 7, 8]);
 impl_write!(u16, write_u16_replicated, [9, 10, 11, 12, 13, 14, 15, 16]);
 impl_write!(
