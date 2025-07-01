@@ -292,12 +292,15 @@ macro_rules! impl_write {
                         *word = nb::block!(<Self as embedded_hal_nb::spi::FullDuplex<$type>>::read(self))?;
                     }
 
-
                     Ok(())
                 }
 
                 fn flush(&mut self) -> Result<(), Self::Error>{
+                    // Wait for all words in the FIFO to have been pulled by the SM
                     while !self.tx.is_empty() {}
+                    
+                    // Wait for last value to be written out to the wire
+                    while !self.tx.has_stalled() {}
 
                     Ok(())
                 }
