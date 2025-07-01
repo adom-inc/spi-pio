@@ -216,7 +216,9 @@ macro_rules! impl_write {
 
                 fn write(&mut self, word: $type) -> nb::Result<(), core::convert::Infallible> {
                     if self.tx.$fn(word) {
+                        // Makes has_stalled return false until the SM stalls again
                         self.tx.clear_stalled_flag();
+
                         Ok(())
                     } else {
                         Err(nb::Error::WouldBlock)
@@ -247,6 +249,10 @@ macro_rules! impl_write {
             {
                 fn read(&mut self, words: &mut [$type]) -> Result<(), Self::Error> {
                     for word in words {
+                        // write empty word
+                        nb::block!(<Self as embedded_hal_nb::spi::FullDuplex<$type>>::write(self, 0))?;
+
+                        // read one word
                         *word = nb::block!(<Self as embedded_hal_nb::spi::FullDuplex<$type>>::read(self))?;
                     }
 
@@ -255,7 +261,11 @@ macro_rules! impl_write {
 
                 fn write(&mut self, words: &[$type]) -> Result<(), Self::Error> {
                     for word in words {
+                        // write one word
                         nb::block!(<Self as embedded_hal_nb::spi::FullDuplex<$type>>::write(self, *word))?;
+
+                        // drop read word
+                        nb::block!(<Self as embedded_hal_nb::spi::FullDuplex<$type>>::read(self))?;
                     }
 
                     Ok(())
