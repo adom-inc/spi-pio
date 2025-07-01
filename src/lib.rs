@@ -216,6 +216,7 @@ macro_rules! impl_write {
 
                 fn write(&mut self, word: $type) -> nb::Result<(), core::convert::Infallible> {
                     if self.tx.$fn(word) {
+                        self.tx.clear_stalled_flag();
                         Ok(())
                     } else {
                         Err(nb::Error::WouldBlock)
@@ -298,7 +299,7 @@ macro_rules! impl_write {
                 fn flush(&mut self) -> Result<(), Self::Error>{
                     // Wait for all words in the FIFO to have been pulled by the SM
                     while !self.tx.is_empty() {}
-                    
+
                     // Wait for last value to be written out to the wire
                     while !self.tx.has_stalled() {}
 
